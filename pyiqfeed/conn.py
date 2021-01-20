@@ -1725,9 +1725,12 @@ class HistoryConn(FeedConn):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
-            if len(fields) > 2:
+            if len(fields) == 3:
                 if fields[2] != "":
                     err_msg = fields[2]
+            if len(fields) > 3:
+                if fields[2] != "":
+                    err_msg = fields[2:]
             self._req_err[req_id] = err_msg
         elif '!ENDMSG!' == fields[1]:
             self._req_event[req_id].set()
