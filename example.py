@@ -23,13 +23,13 @@ def launch_service():
                          version="Debugging",
                          login=dtn_login,
                          password=dtn_password)
-    svc.launch(headless=False)
+    # svc.launch(headless=False)
 
     # If you are running headless comment out the line above and uncomment
     # the line below instead. This runs IQFeed.exe using the xvfb X Framebuffer
     # server since IQFeed.exe runs under wine and always wants to create a GUI
     # window.
-    # svc.launch(headless=True)
+    svc.launch(headless=True)
 
 
 def get_level_1_quotes_and_trades(ticker: str, seconds: int):

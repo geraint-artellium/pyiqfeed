@@ -1730,7 +1730,10 @@ class HistoryConn(FeedConn):
                     err_msg = fields[2]
             if len(fields) > 3:
                 if fields[2] != "":
-                    err_msg = fields[2:]
+                    if fields[3] != "":
+                        err_msg = fields[2:]
+                    else:
+                        err_msg = fields[2]
             self._req_err[req_id] = err_msg
         elif '!ENDMSG!' == fields[1]:
             self._req_event[req_id].set()
