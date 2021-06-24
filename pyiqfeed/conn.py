@@ -72,7 +72,7 @@ class FeedConn:
 
     """
 
-    protocol = "6.0"
+    protocol = "6.1"
 
     iqfeed_host = os.getenv('IQFEED_HOST', "127.0.0.1")
     quote_port = int(os.getenv('IQFEED_PORT_QUOTE', 5009))
