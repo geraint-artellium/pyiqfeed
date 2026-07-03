@@ -232,6 +232,14 @@ class SilentQuoteListener(SilentIQFeedListener):
         """IP Address used to connect to DTN's servers."""
         pass
 
+    def process_trade_correction(self, correction: np.array) -> None:
+        """
+        A trade correction was received.
+
+        :param correction: numpy structured array of type QuoteConn.trade_correction_type
+        """
+        pass
+
 
 # noinspection PyMethodMayBeStatic
 class SilentAdminListener(SilentIQFeedListener):
@@ -522,6 +530,10 @@ class VerboseQuoteListener(VerboseIQFeedListener):
 
     def process_ip_addresses_used(self, ip: str) -> None:
         print("%s: IP Addresses Used: %s" % (self._name, ip))
+
+    def process_trade_correction(self, correction: np.array) -> None:
+        print("%s: Trade Correction:" % self._name)
+        print(correction)
 
 
 # noinspection PyMethodMayBeStatic,PyMissingOrEmptyDocstring

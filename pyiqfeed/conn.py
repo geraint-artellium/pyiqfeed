@@ -54,7 +54,7 @@ import threading
 import time
 
 from collections import deque, namedtuple
-from typing import Sequence, List
+from typing import Sequence, List, Union
 import xml.etree.ElementTree as ElementTree
 
 import numpy as np
@@ -87,10 +87,11 @@ class FeedConn:
     databuf = namedtuple(
         "databuf", ('failed', 'err_msg', 'num_pts', 'raw_data'))
 
-    def __init__(self, name: str, host: str, port: int):
+    def __init__(self, name: str, host: str, port: int, protocol: str = None):
         self._host = host
         self._port = port
         self._name = name
+        self._protocol = protocol if protocol is not None else self.protocol
 
         self._stop = threading.Event()
         self._start_lock = threading.Lock()
@@ -118,7 +119,7 @@ class FeedConn:
 
         """
         self._sock.connect((self._host, self._port))
-        self._set_protocol(FeedConn.protocol)
+        self._set_protocol(self._protocol)
         self._set_client_name(self.name())
         self._send_connect_message()
         self.start_runner()
@@ -177,6 +178,15 @@ class FeedConn:
     def name(self) -> str:
         """Return whatever you named this conn class in the constructor"""
         return self._name
+
+    def _is_protocol_at_least(self, major: int, minor: int) -> bool:
+        try:
+            parts = [int(x) for x in self._protocol.split('.')]
+            if len(parts) < 2:
+                parts.append(0)
+            return parts[0] > major or (parts[0] == major and parts[1] >= minor)
+        except ValueError:
+            return self._protocol >= f"{major}.{minor}"
 
     def _send_cmd(self, cmd: str) -> None:
         with self._send_lock:
@@ -316,9 +326,9 @@ class FeedConn:
         assert fields[0] == "S"
         assert fields[1] == "CURRENT PROTOCOL"
         protocol = fields[2]
-        if protocol != FeedConn.protocol:
+        if protocol != self._protocol:
             err_msg = ("Desired Protocol %s, Server Says Protocol %s in %s" % (
-                FeedConn.protocol, protocol, self.name()))
+                self._protocol, protocol, self.name()))
             raise UnexpectedProtocol(err_msg)
 
     def _process_server_disconnected(self, fields: Sequence[str]) -> None:
@@ -528,6 +538,20 @@ class QuoteConn(FeedConn):
                               ('Fraction Display Code', 'u1'),
                               ('Decimal Precision', 'u2')])
 
+    # Type of numpy structured array used to return trade corrections.
+    trade_correction_type = np.dtype([
+        ('Symbol', 'S128'),
+        ('Correction Type', 'S1'),
+        ('Trade Type', 'S1'),
+        ('Trade Date', 'M8[D]'),
+        ('Trade Time', 'u8'),
+        ('Trade Price', 'f8'),
+        ('Trade Size', 'u8'),
+        ('TickID', 'u8'),
+        ('Trade Conditions', 'S16'),
+        ('Trade Market Center', 'u2')
+    ])
+
     # List of fields provided by IQFeed.exe in the fundamentals message.
     fundamental_fields = ["Symbol", "Exchange ID", "PE", "Average Volume",
                           "52 Week High", "52 Week Low", "Calendar Year High",
@@ -718,8 +742,8 @@ class QuoteConn(FeedConn):
             "story_date", "story_time", "headline"))
 
     def __init__(self, name: str = "QuoteConn", host: str = FeedConn.host,
-                 port: int = port):
-        super().__init__(name, host, port)
+                 port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
         self._current_update_fields = []
         self._update_names = []
         self._update_dtype = []
@@ -740,6 +764,7 @@ class QuoteConn(FeedConn):
         self._empty_fundamental_msg = np.zeros(
                 1, dtype=QuoteConn.fundamental_type)
         self._empty_regional_msg = np.zeros(1, dtype=QuoteConn.regional_type)
+        self._empty_trade_correction_msg = np.zeros(1, dtype=QuoteConn.trade_correction_type)
 
     def connect(self) -> None:
         """
@@ -760,6 +785,7 @@ class QuoteConn(FeedConn):
         self._pf_dict['P'] = self._process_summary
         self._pf_dict['Q'] = self._process_update
         self._pf_dict['F'] = self._process_fundamentals
+        self._pf_dict['C'] = self._process_trade_correction
 
         self._sm_dict["KEY"] = self._process_auth_key
         self._sm_dict["KEYOK"] = self._process_keyok
@@ -821,6 +847,25 @@ class QuoteConn(FeedConn):
         rgn_quote["Market Center"] = fr.read_uint8(fields[11])
         for listener in self._listeners:
             listener.process_regional_rgn_quote(rgn_quote)
+
+    def _process_trade_correction(self, fields: Sequence[str]) -> None:
+        """Process a trade correction message."""
+        assert len(fields) >= 11
+        assert fields[0] == "C"
+        corr = self._empty_trade_correction_msg
+        corr['Symbol'] = fields[1]
+        corr['Correction Type'] = fields[2]
+        corr['Trade Type'] = fields[3]
+        corr['Trade Date'] = fr.read_mmddccyy(fields[4])
+        corr['Trade Time'] = fr.read_hhmmssus(fields[5])
+        corr['Trade Price'] = fr.read_float64(fields[6])
+        corr['Trade Size'] = fr.read_uint64(fields[7])
+        corr['TickID'] = fr.read_uint64(fields[8])
+        corr['Trade Conditions'] = fields[9]
+        corr['Trade Market Center'] = fr.read_uint16(fields[10])
+        for listener in self._listeners:
+            if hasattr(listener, 'process_trade_correction'):
+                listener.process_trade_correction(corr)
 
     def _process_summary(self, fields: Sequence[str]) -> None:
         """Process a symbol summary message"""
@@ -902,7 +947,7 @@ class QuoteConn(FeedConn):
         msg['Coupon Rate'] = fr.read_float64(fields[51])
         msg['Expiration Date'] = fr.read_mmddccyy(fields[52])
         msg['Strike Price'] = fr.read_float64(fields[53])
-        msg['NAICS'] = fr.read_uint8(fields[54])
+        msg['NAICS'] = fr.read_uint64(fields[54])
         msg['Exchange Root'] = fields[55]
         msg['Option Premium Multiplier'] = fr.read_float64(fields[56])
         msg['Option Multiple Deliverable'] = fr.read_uint8(fields[57])
@@ -1363,8 +1408,8 @@ class AdminConn(FeedConn):
     host = FeedConn.host
 
     def __init__(self, name: str = "AdminConn", host: str = host,
-                 port: int = port):
-        super().__init__(name, host, port)
+                 port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
         self._set_message_mappings()
 
     def _set_message_mappings(self) -> None:
@@ -1698,8 +1743,8 @@ class HistoryConn(FeedConn):
              ('open_int', 'u8')])
 
     def __init__(self, name: str = "HistoryConn", host: str = FeedConn.host,
-                 port: int = port):
-        super().__init__(name, host, port)
+                 port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
         self._set_message_mappings()
         self._req_num = 0
         self._req_buf = {}
@@ -1721,7 +1766,7 @@ class HistoryConn(FeedConn):
 
     def _process_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1]:
+        if 'E' == fields[1] and len(fields) > 2 and fields[2].startswith('!'):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -1781,22 +1826,23 @@ class HistoryConn(FeedConn):
             return np.array([res.err_msg], dtype='object')
         else:
             data = np.empty(res.num_pts, HistoryConn.tick_type)
+            offset = 1 if self._is_protocol_at_least(6, 2) else 0
             line_num = 0
             while res.raw_data and (line_num < res.num_pts):
                 dl = res.raw_data.popleft()
-                (dt, tm) = fr.read_posix_ts_us(dl[1])
+                (dt, tm) = fr.read_posix_ts_us(dl[1 + offset])
                 data[line_num]['date'] = dt
                 data[line_num]['time'] = tm
-                data[line_num]['last'] = np.float64(dl[2])
-                data[line_num]['last_sz'] = np.uint64(dl[3])
-                data[line_num]['tot_vlm'] = np.uint64(dl[4])
-                data[line_num]['bid'] = np.float64(dl[5])
-                data[line_num]['ask'] = np.float64(dl[6])
-                data[line_num]['tick_id'] = np.uint64(dl[7])
-                data[line_num]['last_type'] = dl[8]
-                data[line_num]['mkt_ctr'] = np.uint32(dl[9])
+                data[line_num]['last'] = np.float64(dl[2 + offset])
+                data[line_num]['last_sz'] = np.uint64(dl[3 + offset])
+                data[line_num]['tot_vlm'] = np.uint64(dl[4 + offset])
+                data[line_num]['bid'] = np.float64(dl[5 + offset])
+                data[line_num]['ask'] = np.float66(dl[6 + offset]) if hasattr(np, 'float66') else np.float64(dl[6 + offset])
+                data[line_num]['tick_id'] = np.uint64(dl[7 + offset])
+                data[line_num]['last_type'] = dl[8 + offset]
+                data[line_num]['mkt_ctr'] = np.uint32(dl[9 + offset])
 
-                cond_str = dl[10]
+                cond_str = dl[10 + offset]
                 num_cond = len(cond_str) / 2
                 if num_cond > 0:
                     data[line_num]['cond1'] = np.uint8(int(cond_str[0:2], 16))
@@ -1966,19 +2012,20 @@ class HistoryConn(FeedConn):
             return np.array([res.err_msg], dtype='object')
         else:
             data = np.empty(res.num_pts, HistoryConn.bar_type)
+            offset = 1 if self._is_protocol_at_least(6, 2) else 0
             line_num = 0
             while res.raw_data and (line_num < res.num_pts):
                 dl = res.raw_data.popleft()
-                (dt, tm) = fr.read_posix_ts(dl[1])
+                (dt, tm) = fr.read_posix_ts(dl[1 + offset])
                 data[line_num]['date'] = dt
                 data[line_num]['time'] = tm
-                data[line_num]['high_p'] = np.float64(dl[2])
-                data[line_num]['low_p'] = np.float64(dl[3])
-                data[line_num]['open_p'] = np.float64(dl[4])
-                data[line_num]['close_p'] = np.float64(dl[5])
-                data[line_num]['tot_vlm'] = np.int64(dl[6])
-                data[line_num]['prd_vlm'] = np.int64(dl[7])
-                data[line_num]['num_trds'] = np.int64(dl[8])
+                data[line_num]['high_p'] = np.float64(dl[2 + offset])
+                data[line_num]['low_p'] = np.float64(dl[3 + offset])
+                data[line_num]['open_p'] = np.float64(dl[4 + offset])
+                data[line_num]['close_p'] = np.float64(dl[5 + offset])
+                data[line_num]['tot_vlm'] = np.int64(dl[6 + offset])
+                data[line_num]['prd_vlm'] = np.int64(dl[7 + offset])
+                data[line_num]['num_trds'] = np.int64(dl[8 + offset])
                 line_num += 1
                 if line_num >= res.num_pts:
                     assert len(res.raw_data) == 0
@@ -2179,16 +2226,17 @@ class HistoryConn(FeedConn):
             return np.array([res.err_msg], dtype='object')
         else:
             data = np.empty(res.num_pts, HistoryConn.daily_type)
+            offset = 1 if self._is_protocol_at_least(6, 2) else 0
             line_num = 0
             while res.raw_data and (line_num < res.num_pts):
                 dl = res.raw_data.popleft()
-                data[line_num]['date'] = np.datetime64(dl[1], 'D')
-                data[line_num]['high_p'] = np.float64(dl[2])
-                data[line_num]['low_p'] = np.float64(dl[3])
-                data[line_num]['open_p'] = np.float64(dl[4])
-                data[line_num]['close_p'] = np.float64(dl[5])
-                data[line_num]['prd_vlm'] = np.uint64(dl[6])
-                data[line_num]['open_int'] = np.uint64(dl[7])
+                data[line_num]['date'] = np.datetime64(dl[1 + offset], 'D')
+                data[line_num]['high_p'] = np.float64(dl[2 + offset])
+                data[line_num]['low_p'] = np.float64(dl[3 + offset])
+                data[line_num]['open_p'] = np.float64(dl[4 + offset])
+                data[line_num]['close_p'] = np.float64(dl[5 + offset])
+                data[line_num]['prd_vlm'] = np.uint64(dl[6 + offset])
+                data[line_num]['open_int'] = np.uint64(dl[7 + offset])
                 line_num += 1
                 if line_num >= res.num_pts:
                     assert len(res.raw_data) == 0
@@ -2390,8 +2438,8 @@ class TableConn(FeedConn):
     naic_type = np.dtype([('naic', 'u8'), ('name', 'S128')])
 
     def __init__(self, name: str = "TableConn", host: str = FeedConn.host,
-                 port: int = port):
-        super().__init__(name, host, port)
+                 port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
 
         self.markets = None
         self.security_types = None
@@ -2630,8 +2678,8 @@ class LookupConn(FeedConn):
              ('name', 'S128'), ('sector', 'u8')])
 
     def __init__(self, name: str = "SymbolSearchConn",
-                 host: str = FeedConn.host, port: int = port):
-        super().__init__(name, host, port)
+                 host: str = FeedConn.host, port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
         self._set_message_mappings()
         self._req_num = 0
         self._req_buf = {}
@@ -2651,7 +2699,7 @@ class LookupConn(FeedConn):
 
     def _process_lookup_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1]:
+        if 'E' == fields[1] and len(fields) > 2 and fields[2].startswith('!'):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -2704,13 +2752,14 @@ class LookupConn(FeedConn):
             return np.array([res.err_msg], dtype='object')
         else:
             data = np.empty(res.num_pts, LookupConn.asset_type)
+            offset = 1 if self._is_protocol_at_least(6, 2) else 0
             line_num = 0
             while res.raw_data and (line_num < res.num_pts):
                 dl = res.raw_data.popleft()
-                data[line_num]['symbol'] = dl[1].strip()
-                data[line_num]['market'] = fr.read_uint8(dl[2])
-                data[line_num]['security_type'] = fr.read_uint8(dl[3])
-                data[line_num]['name'] = dl[4].strip()
+                data[line_num]['symbol'] = dl[1 + offset].strip()
+                data[line_num]['market'] = fr.read_uint8(dl[2 + offset])
+                data[line_num]['security_type'] = fr.read_uint8(dl[3 + offset])
+                data[line_num]['name'] = dl[4 + offset].strip()
                 data[line_num]['sector'] = 0
                 line_num += 1
                 if line_num >= res.num_pts:
@@ -2763,14 +2812,15 @@ class LookupConn(FeedConn):
             return np.array([res.err_msg], dtype='object')
         else:
             data = np.empty(res.num_pts, LookupConn.asset_type)
+            offset = 1 if self._is_protocol_at_least(6, 2) else 0
             line_num = 0
             while res.raw_data and (line_num < res.num_pts):
                 dl = res.raw_data.popleft()
-                data[line_num]['sector'] = fr.read_uint64(dl[1])
-                data[line_num]['symbol'] = dl[2].strip()
-                data[line_num]['market'] = fr.read_uint8(dl[3])
-                data[line_num]['security_type'] = fr.read_uint8(dl[4])
-                data[line_num]['name'] = dl[5].strip()
+                data[line_num]['sector'] = fr.read_uint64(dl[1 + offset])
+                data[line_num]['symbol'] = dl[2 + offset].strip()
+                data[line_num]['market'] = fr.read_uint8(dl[3 + offset])
+                data[line_num]['security_type'] = fr.read_uint8(dl[4 + offset])
+                data[line_num]['name'] = dl[5 + offset].strip()
                 line_num += 1
                 if line_num >= res.num_pts:
                     assert len(res.raw_data) == 0
@@ -2814,7 +2864,7 @@ class LookupConn(FeedConn):
         """
         req_id = self._get_next_req_id()
         self._setup_request_data(req_id)
-        req_cmd = "SBS,%d,%s\r\n" % (naic, req_id)
+        req_cmd = "SBN,%d,%s\r\n" % (naic, req_id)
         self._send_cmd(req_cmd)
         self._req_event[req_id].wait(timeout=timeout)
         data = self._read_symbols_with_sect(req_id)
@@ -2831,8 +2881,12 @@ class LookupConn(FeedConn):
             return ["!ERROR!", res.err_msg]
         else:
             assert res.num_pts == 1
-            chain = res.raw_data[0][1:]
-            if chain[-1] == "":
+            row = res.raw_data[0]
+            if self._is_protocol_at_least(6, 2):
+                chain = row[2:]
+            else:
+                chain = row[1:]
+            if chain and chain[-1] == "":
                 chain = chain[:-1]
             return chain
 
@@ -2930,7 +2984,11 @@ class LookupConn(FeedConn):
             return ["!ERROR!", res.err_msg]
         else:
             assert res.num_pts == 1
-            symbols = res.raw_data[0][1:]
+            row = res.raw_data[0]
+            if self._is_protocol_at_least(6, 2):
+                symbols = row[2:]
+            else:
+                symbols = row[1:]
             cp_delim = symbols.index(':')
             call_symbols = symbols[:cp_delim]
             if len(call_symbols) > 0:
@@ -3084,6 +3142,113 @@ class LookupConn(FeedConn):
         else:
             return data
 
+    def request_5MD(
+        self,
+        security_type: Union[int, str],
+        market: Union[int, str],
+        timeout: float = None,
+    ) -> List[List[str]]:
+        """
+        Request 5-minute snapshots (5MS) for the specified security type and market.
+
+        :param security_type: security type ID (e.g. 1)
+        :param market: market (group) ID (e.g. 30)
+        :param timeout: timeout in seconds
+        :return: list of rows, where each row is a list of strings
+        """
+        req_id = self._get_next_req_id()
+        self._setup_request_data(req_id)
+        req_cmd = "5MS,%s,%s,%s\r\n" % (
+            fr.blob_to_str(security_type),
+            fr.blob_to_str(market),
+            req_id,
+        )
+        self._send_cmd(req_cmd)
+        self._req_event[req_id].wait(timeout=timeout)
+        data = self._read_mkt_summary(req_id)
+        if (type(data) == list) and (len(data) > 0) and (data[0] == "!ERROR!"):
+            err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
+            raise RuntimeError(err_msg)
+        else:
+            return data
+
+    def request_FDS(
+        self,
+        security_type: Union[int, str],
+        market: Union[int, str],
+        date: datetime.date = None,
+        timeout: float = None,
+    ) -> List[List[str]]:
+        """
+        Request fundamental data search (FDS) for the specified security type and market on a given date.
+
+        :param security_type: security type ID
+        :param market: market (group) ID
+        :param date: datetime.date object (optional)
+        :param timeout: timeout in seconds
+        :return: list of rows, where each row is a list of strings
+        """
+        req_id = self._get_next_req_id()
+        self._setup_request_data(req_id)
+        date_str = fr.date_to_yyyymmdd(date) if date is not None else ""
+        req_cmd = "FDS,%s,%s,%s,%s\r\n" % (
+            fr.blob_to_str(security_type),
+            fr.blob_to_str(market),
+            date_str,
+            req_id,
+        )
+        self._send_cmd(req_cmd)
+        self._req_event[req_id].wait(timeout=timeout)
+        data = self._read_mkt_summary(req_id)
+        if (type(data) == list) and (len(data) > 0) and (data[0] == "!ERROR!"):
+            err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
+            raise RuntimeError(err_msg)
+        else:
+            return data
+
+    def request_EDS(
+        self,
+        security_type: Union[int, str],
+        market: Union[int, str],
+        date: datetime.date = None,
+        timeout: float = None,
+    ) -> List[List[str]]:
+        """
+        Request description search (EDS) for the specified security type and market on a given date.
+
+        :param security_type: security type ID
+        :param market: market (group) ID
+        :param date: datetime.date object (optional)
+        :param timeout: timeout in seconds
+        :return: list of rows, where each row is a list of strings
+        """
+        req_id = self._get_next_req_id()
+        self._setup_request_data(req_id)
+        date_str = fr.date_to_yyyymmdd(date) if date is not None else ""
+        req_cmd = "EDS,%s,%s,%s,%s\r\n" % (
+            fr.blob_to_str(security_type),
+            fr.blob_to_str(market),
+            date_str,
+            req_id,
+        )
+        self._send_cmd(req_cmd)
+        self._req_event[req_id].wait(timeout=timeout)
+        data = self._read_mkt_summary(req_id)
+        if (type(data) == list) and (len(data) > 0) and (data[0] == "!ERROR!"):
+            err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
+            raise RuntimeError(err_msg)
+        else:
+            return data
+
+    def _read_mkt_summary(self, req_id: str) -> Union[List[List[str]], List[str]]:
+        res = self._get_data_buf(req_id)
+        if res.failed:
+            return ["!ERROR!", res.err_msg]
+        else:
+            offset = 1 if self._is_protocol_at_least(6, 2) else 0
+            raw_data = list(res.raw_data)
+            return [row[1 + offset:] for row in raw_data]
+
 
 class BarConn(FeedConn):
     """
@@ -3126,8 +3291,8 @@ class BarConn(FeedConn):
              ('num_trds', 'u8')])
 
     def __init__(self, name: str = "BarConn", host: str = host,
-                 port: int = port):
-        super().__init__(name, host, port)
+                 port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
         self._set_message_mappings()
         self._empty_interval_msg = np.zeros(1, dtype=BarConn.interval_data_type)
 
@@ -3308,8 +3473,8 @@ class NewsConn(FeedConn):
     NewsCountMsg = namedtuple("NewsCountMsg", ("symbol", "count"))
 
     def __init__(self, name: str = "NewsConn", host: str = FeedConn.host,
-                 port: int = port):
-        super().__init__(name, host, port)
+                 port: int = port, protocol: str = None):
+        super().__init__(name, host, port, protocol=protocol)
         self._set_message_mappings()
         self._req_num = 0
         self._req_buf = {}
@@ -3329,7 +3494,7 @@ class NewsConn(FeedConn):
 
     def _process_news_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1]:
+        if 'E' == fields[1] and len(fields) > 2 and fields[2].startswith('!'):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -3469,7 +3634,8 @@ class NewsConn(FeedConn):
 
     def request_news_headlines(self, sources: List[str] = None,
                                symbols: List[str] = None,
-                               date: datetime.date = None, limit: int = 1000,
+                               date = None,
+                               limit: int = 1000,
                                timeout: int = None) -> List[NewsMsg]:
         """
         Get all current news headlines.
@@ -3514,7 +3680,12 @@ class NewsConn(FeedConn):
 
         date_str = ''
         if date is not None:
-            date_str = fr.date_to_yyyymmdd(date)
+            if isinstance(date, datetime.datetime):
+                date_str = fr.date_to_yyyymmdd(date)
+            else:
+                # Here we want to be able to pass a string as specified in the protocol 6.1 documentation, which
+                # supposedly allows passing a range of colon-delimited datetimes
+                date_str = date
 
         req_cmd = "NHL,%s,%s,%s,%d,%s,%s\r\n" % (
             sources_str, symbols_str, 'x', limit, date_str, req_id)
