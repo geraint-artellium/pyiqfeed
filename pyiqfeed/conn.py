@@ -3547,18 +3547,14 @@ class NewsConn(FeedConn):
     def _get_xml_message(self, req_id: str):
         """Convert a buffer into an XML ElementTree"""
         res = self._get_data_buf(req_id)
-        # # Original code below. The problem is that it flags a failure if any line of the news message begins with a
-        # # single letter 'E', which is not common, but not impossible.
-        # if res.failed:
-        #     return np.array([res.err_msg], dtype='object')
-        # else:
-        #     raw_text = '\n'.join([''.join(line[1:]) for line in res.raw_data])
-        #     return ElementTree.fromstring(raw_text)
-        # # Instead, we will just try to parse the whole thing as XML. If the request really failed, this will almost
-        # # certainly fail as no valid XML will have been returned. In that case, we will flag a failure as before. If
-        # # parsing fails and no error was raised, something nasty has happened, and we reraise the error.
         try:
-            raw_text = '\n'.join([''.join(line[1:]) for line in res.raw_data])
+            raw_lines = []
+            for line in res.raw_data:
+                if len(line) > 1 and line[1] == 'LN':
+                    raw_lines.append(','.join(line[2:]))
+                else:
+                    raw_lines.append(','.join(line[1:]))
+            raw_text = '\n'.join(raw_lines)
             return ElementTree.fromstring(raw_text)
         except Exception as e:
             if res.failed:
