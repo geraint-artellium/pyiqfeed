@@ -285,10 +285,12 @@ def datetime64_to_date(dt64: np.datetime64) -> datetime.date:
     return dt64.astype(datetime.date)
 
 
-def date_to_yyyymmdd(dt: datetime.date) -> str:
-    """Convert a datetime.date to a CCYYMMDD string."""
+def date_to_yyyymmdd(dt: Union[datetime.date, str]) -> str:
+    """Convert a datetime.date or string to a CCYYMMDD string."""
     if dt is not None:
-        return "%.4d%.2d%.2d" % (dt.year, dt.month, dt.day)
+        if isinstance(dt, (datetime.date, datetime.datetime)):
+            return "%.4d%.2d%.2d" % (dt.year, dt.month, dt.day)
+        return str(dt)
     else:
         return ""
 

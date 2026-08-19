@@ -1766,7 +1766,7 @@ class HistoryConn(FeedConn):
 
     def _process_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1] and len(fields) > 2 and fields[2].startswith('!'):
+        if 'E' == fields[1]:
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -2699,7 +2699,7 @@ class LookupConn(FeedConn):
 
     def _process_lookup_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1] and len(fields) > 2 and fields[2].startswith('!'):
+        if 'E' == fields[1] and (len(fields) <= 3 or not fields[2].isdigit()):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -3494,7 +3494,7 @@ class NewsConn(FeedConn):
 
     def _process_news_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1] and len(fields) > 2 and fields[2].startswith('!'):
+        if 'E' == fields[1] and (len(fields) <= 2 or fields[2].startswith('!') or 'Unauthorized' in fields[2] or 'Error' in fields[2]):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -3680,12 +3680,10 @@ class NewsConn(FeedConn):
 
         date_str = ''
         if date is not None:
-            if isinstance(date, datetime.datetime):
+            if isinstance(date, (datetime.date, datetime.datetime)):
                 date_str = fr.date_to_yyyymmdd(date)
             else:
-                # Here we want to be able to pass a string as specified in the protocol 6.1 documentation, which
-                # supposedly allows passing a range of colon-delimited datetimes
-                date_str = date
+                date_str = str(date)
 
         req_cmd = "NHL,%s,%s,%s,%d,%s,%s\r\n" % (
             sources_str, symbols_str, 'x', limit, date_str, req_id)
