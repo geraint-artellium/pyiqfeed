@@ -2459,7 +2459,7 @@ class TableConn(FeedConn):
 
     def _processing_function(self, fields: Sequence[str]):
         """Message processing function."""
-        if fields[0].isdigit():
+        if fields[0].isdigit() or fields[0] == 'LS':
             return self._process_table_entry
         elif fields[0] == '!ENDMSG!':
             return self._process_table_end
@@ -2467,7 +2467,7 @@ class TableConn(FeedConn):
             return super()._processing_function(fields)
 
     def _process_table_entry(self, fields: Sequence[str]) -> None:
-        assert fields[0].isdigit()
+        assert fields[0].isdigit() or fields[0] == 'LS'
         self._current_deque.append(fields)
 
     def _process_table_end(self, fields: Sequence[str]) -> None:
@@ -2528,13 +2528,14 @@ class TableConn(FeedConn):
                 line_num = 0
                 while self._current_deque and (line_num < num_pts):
                     data_list = self._current_deque.popleft()
+                    row_offset = 1 if (len(data_list) > 0 and data_list[0] == 'LS') else 0
                     self.markets[line_num]['mkt_id'] = fr.read_uint64(
-                            data_list[0])
-                    self.markets[line_num]['short_name'] = data_list[1]
-                    self.markets[line_num]['name'] = data_list[2]
+                            data_list[0 + row_offset])
+                    self.markets[line_num]['short_name'] = data_list[1 + row_offset]
+                    self.markets[line_num]['name'] = data_list[2 + row_offset]
                     self.markets[line_num]['group_id'] = fr.read_uint64(
-                            data_list[3])
-                    self.markets[line_num]['group'] = data_list[4]
+                            data_list[3 + row_offset])
+                    self.markets[line_num]['group'] = data_list[4 + row_offset]
                     line_num += 1
                     if line_num >= num_pts:
                         assert len(self._current_deque) == 0
@@ -2555,10 +2556,11 @@ class TableConn(FeedConn):
                 line_num = 0
                 while self._current_deque and (line_num < num_pts):
                     data_list = self._current_deque.popleft()
+                    row_offset = 1 if (len(data_list) > 0 and data_list[0] == 'LS') else 0
                     self.security_types[line_num]['sec_type'] = fr.read_uint64(
-                            data_list[0])
-                    self.security_types[line_num]['short_name'] = data_list[1]
-                    self.security_types[line_num]['name'] = data_list[2]
+                            data_list[0 + row_offset])
+                    self.security_types[line_num]['short_name'] = data_list[1 + row_offset]
+                    self.security_types[line_num]['name'] = data_list[2 + row_offset]
                     line_num += 1
                     if line_num >= num_pts:
                         assert len(self._current_deque) == 0
@@ -2579,10 +2581,11 @@ class TableConn(FeedConn):
                 line_num = 0
                 while self._current_deque and (line_num < num_pts):
                     data_list = self._current_deque.popleft()
+                    row_offset = 1 if (len(data_list) > 0 and data_list[0] == 'LS') else 0
                     self.trade_conds[line_num]['tcond_id'] = fr.read_uint64(
-                            data_list[0])
-                    self.trade_conds[line_num]['short_name'] = data_list[1]
-                    self.trade_conds[line_num]['name'] = data_list[2]
+                            data_list[0 + row_offset])
+                    self.trade_conds[line_num]['short_name'] = data_list[1 + row_offset]
+                    self.trade_conds[line_num]['name'] = data_list[2 + row_offset]
                     line_num += 1
                     if line_num >= num_pts:
                         assert len(self._current_deque) == 0
@@ -2603,8 +2606,9 @@ class TableConn(FeedConn):
                 line_num = 0
                 while self._current_deque and (line_num < num_pts):
                     data_list = self._current_deque.popleft()
-                    self.sics[line_num]['sic'] = fr.read_uint64(data_list[0])
-                    self.sics[line_num]['name'] = ",".join(data_list[1:])
+                    row_offset = 1 if (len(data_list) > 0 and data_list[0] == 'LS') else 0
+                    self.sics[line_num]['sic'] = fr.read_uint64(data_list[0 + row_offset])
+                    self.sics[line_num]['name'] = ",".join(data_list[1 + row_offset:])
                     line_num += 1
                     if line_num >= num_pts:
                         assert len(self._current_deque) == 0
@@ -2625,8 +2629,9 @@ class TableConn(FeedConn):
                 line_num = 0
                 while self._current_deque and (line_num < num_pts):
                     data_list = self._current_deque.popleft()
-                    self.naics[line_num]['naic'] = fr.read_uint64(data_list[0])
-                    self.naics[line_num]['name'] = ",".join(data_list[1:])
+                    row_offset = 1 if (len(data_list) > 0 and data_list[0] == 'LS') else 0
+                    self.naics[line_num]['naic'] = fr.read_uint64(data_list[0 + row_offset])
+                    self.naics[line_num]['name'] = ",".join(data_list[1 + row_offset:])
                     line_num += 1
                     if line_num >= num_pts:
                         assert len(self._current_deque) == 0
