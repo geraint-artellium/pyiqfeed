@@ -553,6 +553,12 @@ class QuoteConn(FeedConn):
     ])
 
     # List of fields provided by IQFeed.exe in the fundamentals message.
+    fundamental_fields_61 = ["Session Open Time", "Session Close Time",
+                             "Base Currency", "Contract Size",
+                             "Contract Months", "Minimum Tick Size",
+                             "First Delivery Date", "FIGI",
+                             "Security SubType"]
+
     fundamental_fields = ["Symbol", "Exchange ID", "PE", "Average Volume",
                           "52 Week High", "52 Week Low", "Calendar Year High",
                           "Calendar Year Low", "Dividend Yield",
@@ -575,7 +581,7 @@ class QuoteConn(FeedConn):
                           "Maturity Date", "Coupon Rate", "Expiration Date",
                           "Strike Price", "NAICS", "Exchange Root",
                           "Option Premium Multiplier",
-                          "Option Multiple Deliverable"]
+                          "Option Multiple Deliverable"] + fundamental_fields_61
 
     # Type of numpy structured array used to return fundamental data.
     fundamental_type = [('Symbol', 'S128'), ('PE', 'f8'),
@@ -611,7 +617,16 @@ class QuoteConn(FeedConn):
                         ('Strike Price', 'f8'), ('NAICS', 'u8'),
                         ('Exchange Root', 'S128'),
                         ('Option Premium Multiplier', 'f8'),
-                        ('Option Multiple Deliverable', 'u8')]
+                        ('Option Multiple Deliverable', 'u8'),
+                        ('Session Open Time', 'u8'),
+                        ('Session Close Time', 'u8'),
+                        ('Base Currency', 'S128'),
+                        ('Contract Size', 'S128'),
+                        ('Contract Months', 'S128'),
+                        ('Minimum Tick Size', 'f8'),
+                        ('First Delivery Date', 'M8[D]'),
+                        ('FIGI', 'S128'),
+                        ('Security SubType', 'u2')]
 
     # For quote updates (provided when the top of book quote changes or a
     # trade happens) IQFeed.exe can send dynamic fieldsets. This means that
@@ -694,11 +709,15 @@ class QuoteConn(FeedConn):
                      # TODO: Parse:
                      'Most Recent Trade':
                          ('Most Recent Trade', 'f8', fr.read_float64),
+                     'Most Recent Trade Aggressor':
+                         ('Most Recent Trade Aggressor', 'u1', fr.read_uint8),
                      'Most Recent Trade Conditions':
                          ('Most Recent Trade Conditions', 'S16', lambda x: x),
                      # todo: Parse
                      'Most Recent Trade Date':
                          ('Most Recent Trade Date', 'M8[D]', fr.read_mmddccyy),
+                     'Most Recent Trade Day Code':
+                         ('Most Recent Trade Day Code', 'u1', fr.read_uint8),
                      'Most Recent Trade Market Center':
                          ('Most Recent Trade Market Center', 'u1',
                           fr.read_uint8),
@@ -846,7 +865,7 @@ class QuoteConn(FeedConn):
         rgn_quote["Decimal Precision"] = fr.read_uint8(fields[10])
         rgn_quote["Market Center"] = fr.read_uint8(fields[11])
         for listener in self._listeners:
-            listener.process_regional_rgn_quote(rgn_quote)
+            listener.process_regional_quote(rgn_quote)
 
     def _process_trade_correction(self, fields: Sequence[str]) -> None:
         """Process a trade correction message."""
@@ -951,6 +970,16 @@ class QuoteConn(FeedConn):
         msg['Exchange Root'] = fields[55]
         msg['Option Premium Multiplier'] = fr.read_float64(fields[56])
         msg['Option Multiple Deliverable'] = fr.read_uint8(fields[57])
+        if len(fields) > 66:
+            msg['Session Open Time'] = fr.read_hhmmss(fields[58])
+            msg['Session Close Time'] = fr.read_hhmmss(fields[59])
+            msg['Base Currency'] = fields[60]
+            msg['Contract Size'] = fields[61]
+            msg['Contract Months'] = fields[62]
+            msg['Minimum Tick Size'] = fr.read_float64(fields[63])
+            msg['First Delivery Date'] = fr.read_mmddccyy(fields[64])
+            msg['FIGI'] = fields[65]
+            msg['Security SubType'] = fr.read_uint16(fields[66])
         for listener in self._listeners:
             listener.process_fundamentals(msg)
 
@@ -1036,11 +1065,15 @@ class QuoteConn(FeedConn):
         assert fields[0] == 'S'
         assert fields[1] == 'FUNDAMENTAL FIELDNAMES'
         for field in fields[2:]:
-            if field not in QuoteConn.fundamental_fields:
+            if field and field not in QuoteConn.fundamental_fields:
                 err_msg = ("%s not found in dtn_fundamental_fields in %s" %
                            (field, self.name()))
                 raise UnexpectedField(err_msg)
         for field in QuoteConn.fundamental_fields:
+            if field in ("(Reserved)", "Short Interest", "Market Center"):
+                continue
+            if not self._is_protocol_at_least(6, 1) and field in QuoteConn.fundamental_fields_61:
+                continue
             if field not in fields[2:]:
                 err_msg = ("%s not found in FUNDAMENTAL FIELDNAMES in %s" %
                            (field, self.name()))
@@ -1058,11 +1091,15 @@ class QuoteConn(FeedConn):
         assert fields[0] == 'S'
         assert fields[1] == 'UPDATE FIELDNAMES'
         for field in fields[2:]:
-            if field not in QuoteConn.quote_msg_map:
+            if field and field not in QuoteConn.quote_msg_map:
                 err_msg = ("%s not found in dtn_update_map in %s" %
                            (field, self.name()))
                 raise UnexpectedField(err_msg)
         for field in QuoteConn.quote_msg_map:
+            if not self._is_protocol_at_least(6, 2) and field == 'Most Recent Trade Aggressor':
+                continue
+            if not self._is_protocol_at_least(6, 1) and field == 'Most Recent Trade Day Code':
+                continue
             if field not in fields[2:]:
                 err_msg = (
                     "%s not found in UPDATE FIELDNAMES in %s" %
@@ -2704,7 +2741,7 @@ class LookupConn(FeedConn):
 
     def _process_lookup_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1] and (len(fields) <= 3 or not fields[2].isdigit()):
+        if 'E' == fields[1] and (self._is_protocol_at_least(6, 2) or len(fields) <= 4):
             # Error
             self._req_failed[req_id] = True
             err_msg = "Unknown Error"
@@ -2764,7 +2801,8 @@ class LookupConn(FeedConn):
                 data[line_num]['symbol'] = dl[1 + offset].strip()
                 data[line_num]['market'] = fr.read_uint8(dl[2 + offset])
                 data[line_num]['security_type'] = fr.read_uint8(dl[3 + offset])
-                data[line_num]['name'] = dl[4 + offset].strip()
+                name_fields = dl[4 + offset:-1] if dl[-1] == "" else dl[4 + offset:]
+                data[line_num]['name'] = ",".join(name_fields).strip()
                 data[line_num]['sector'] = 0
                 line_num += 1
                 if line_num >= res.num_pts:
@@ -2825,7 +2863,8 @@ class LookupConn(FeedConn):
                 data[line_num]['symbol'] = dl[2 + offset].strip()
                 data[line_num]['market'] = fr.read_uint8(dl[3 + offset])
                 data[line_num]['security_type'] = fr.read_uint8(dl[4 + offset])
-                data[line_num]['name'] = dl[5 + offset].strip()
+                name_fields = dl[5 + offset:-1] if dl[-1] == "" else dl[5 + offset:]
+                data[line_num]['name'] = ",".join(name_fields).strip()
                 line_num += 1
                 if line_num >= res.num_pts:
                     assert len(res.raw_data) == 0
@@ -3134,10 +3173,17 @@ class LookupConn(FeedConn):
             assert filt_val_1 < filt_val_2
         req_id = self._get_next_req_id()
         self._setup_request_data(req_id)
-        req_cmd = "CEO,%s,%s,%s,%s,%d,%d,%s,%s,%s\r\n" % (
-            symbol, opt_type, fr.blob_to_str(month_codes),
-            fr.blob_to_str(near_months), include_binary, filt_type,
-            fr.blob_to_str(filt_val_1), fr.blob_to_str(filt_val_2), req_id)
+        if self._is_protocol_at_least(6, 1):
+            req_cmd = "CEO,%s,%s,%s,%s,%d,%s,%s,%s,%d\r\n" % (
+                symbol, opt_type, fr.blob_to_str(month_codes),
+                fr.blob_to_str(near_months), filt_type,
+                fr.blob_to_str(filt_val_1), fr.blob_to_str(filt_val_2),
+                req_id, include_binary)
+        else:
+            req_cmd = "CEO,%s,%s,%s,%s,%d,%d,%s,%s,%s\r\n" % (
+                symbol, opt_type, fr.blob_to_str(month_codes),
+                fr.blob_to_str(near_months), include_binary, filt_type,
+                fr.blob_to_str(filt_val_1), fr.blob_to_str(filt_val_2), req_id)
         self._send_cmd(req_cmd)
         self._req_event[req_id].wait(timeout=timeout)
         data = self._read_option_chain(req_id)

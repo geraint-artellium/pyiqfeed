@@ -290,7 +290,7 @@ def date_to_yyyymmdd(dt: Union[datetime.date, str]) -> str:
     if dt is not None:
         if isinstance(dt, (datetime.date, datetime.datetime)):
             return "%.4d%.2d%.2d" % (dt.year, dt.month, dt.day)
-        return str(dt)
+        return str(dt).replace("-", "")
     else:
         return ""
 
