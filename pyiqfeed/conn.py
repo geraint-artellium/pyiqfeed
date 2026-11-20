@@ -1803,25 +1803,28 @@ class HistoryConn(FeedConn):
 
     def _process_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1]:
-            # Error
-            self._req_failed[req_id] = True
-            err_msg = "Unknown Error"
-            if len(fields) == 3:
-                if fields[2] != "":
-                    err_msg = fields[2]
-            if len(fields) > 3:
-                if fields[2] != "":
-                    if fields[3] != "":
-                        err_msg = fields[2:]
-                    else:
+        with self._req_lock:
+            if req_id not in self._req_buf:
+                return
+            if 'E' == fields[1]:
+                # Error
+                self._req_failed[req_id] = True
+                err_msg = "Unknown Error"
+                if len(fields) == 3:
+                    if fields[2] != "":
                         err_msg = fields[2]
-            self._req_err[req_id] = err_msg
-        elif '!ENDMSG!' == fields[1]:
-            self._req_event[req_id].set()
-        else:
-            self._req_buf[req_id].append(fields)
-            self._req_numlines[req_id] += 1
+                if len(fields) > 3:
+                    if fields[2] != "":
+                        if fields[3] != "":
+                            err_msg = fields[2:]
+                        else:
+                            err_msg = fields[2]
+                self._req_err[req_id] = err_msg
+            elif '!ENDMSG!' == fields[1]:
+                self._req_event[req_id].set()
+            else:
+                self._req_buf[req_id].append(fields)
+                self._req_numlines[req_id] += 1
 
     def _get_next_req_id(self) -> str:
         with self._req_num_lock:
@@ -1831,10 +1834,19 @@ class HistoryConn(FeedConn):
 
     def _cleanup_request_data(self, req_id: str) -> None:
         with self._req_lock:
-            del self._req_failed[req_id]
-            del self._req_err[req_id]
-            del self._req_buf[req_id]
-            del self._req_numlines[req_id]
+            self._req_failed.pop(req_id, None)
+            self._req_err.pop(req_id, None)
+            self._req_buf.pop(req_id, None)
+            self._req_numlines.pop(req_id, None)
+            self._req_event.pop(req_id, None)
+
+    def _wait_for_request(self, req_id: str, req_cmd: str,
+                          timeout: int = None) -> None:
+        if not self._req_event[req_id].wait(timeout=timeout):
+            self._cleanup_request_data(req_id)
+            raise TimeoutError(
+                "Request: %s timed out after %s seconds" % (
+                    req_cmd.strip(), timeout))
 
     def _setup_request_data(self, req_id: str) -> None:
         """Setup empty buffers and other variables for a request."""
@@ -1929,7 +1941,7 @@ class HistoryConn(FeedConn):
         req_cmd = ("HTX,%s,%d,%d,%s,%d\r\n" % (
             ticker, max_ticks, ascend, req_id, pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_ticks(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -1976,7 +1988,7 @@ class HistoryConn(FeedConn):
             ticker, num_days, mt_str, bf_str, ef_str, ascend, req_id,
             pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_ticks(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2028,7 +2040,7 @@ class HistoryConn(FeedConn):
             ticker, bp_str, ep_str, mt_str, bf_str, ef_str, ascend, req_id,
             pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_ticks(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2110,7 +2122,7 @@ class HistoryConn(FeedConn):
             ticker, interval_len, max_bars, ascend, req_id, bars_per_batch,
             interval_type, label_at_begin))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_bars(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2175,7 +2187,7 @@ class HistoryConn(FeedConn):
             ticker, interval_len, days, mb_str, bf_str, ef_str, ascend, req_id,
             bars_per_batch, interval_type, label_at_begin)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_bars(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2242,7 +2254,7 @@ class HistoryConn(FeedConn):
             ticker, interval_len, bp_str, ep_str, mb_str, bf_str, ef_str,
             ascend, req_id, bars_per_batch, interval_type, label_at_beginning))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_bars(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2302,7 +2314,7 @@ class HistoryConn(FeedConn):
         req_cmd = ("HDX,%s,%d,%d,%s,%d\r\n" % (
             ticker, num_days, ascend, req_id, pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_daily_data(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2347,7 +2359,7 @@ class HistoryConn(FeedConn):
         req_cmd = ("HDT,%s,%s,%s,%s,%d,%s,%d\r\n" % (
             ticker, bgn_str, end_str, md_str, ascend, req_id, pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_daily_data(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2382,7 +2394,7 @@ class HistoryConn(FeedConn):
         req_cmd = ("HWX,%s,%d,%d,%s,%d\r\n" % (
             ticker, num_weeks, ascend, req_id, pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_daily_data(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2417,7 +2429,7 @@ class HistoryConn(FeedConn):
         req_cmd = ("HMX,%s,%d,%d,%s,%d\r\n" % (
             ticker, num_months, ascend, req_id, pts_per_batch))
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_daily_data(req_id)
         if data.dtype == object:
             iqfeed_err = str(data[0])
@@ -2741,19 +2753,22 @@ class LookupConn(FeedConn):
 
     def _process_lookup_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1] and (self._is_protocol_at_least(6, 2) or len(fields) <= 4):
-            # Error
-            self._req_failed[req_id] = True
-            err_msg = "Unknown Error"
-            if len(fields) > 2:
-                if fields[2] != "":
-                    err_msg = fields[2]
-            self._req_err[req_id] = err_msg
-        elif '!ENDMSG!' == fields[1]:
-            self._req_event[req_id].set()
-        else:
-            self._req_buf[req_id].append(fields)
-            self._req_numlines[req_id] += 1
+        with self._req_lock:
+            if req_id not in self._req_buf:
+                return
+            if 'E' == fields[1] and (self._is_protocol_at_least(6, 2) or len(fields) <= 4):
+                # Error
+                self._req_failed[req_id] = True
+                err_msg = "Unknown Error"
+                if len(fields) > 2:
+                    if fields[2] != "":
+                        err_msg = fields[2]
+                self._req_err[req_id] = err_msg
+            elif '!ENDMSG!' == fields[1]:
+                self._req_event[req_id].set()
+            else:
+                self._req_buf[req_id].append(fields)
+                self._req_numlines[req_id] += 1
 
     def _get_next_req_id(self) -> str:
         with self._req_lock:
@@ -2763,10 +2778,19 @@ class LookupConn(FeedConn):
 
     def _cleanup_request_data(self, req_id: str) -> None:
         with self._req_lock:
-            del self._req_failed[req_id]
-            del self._req_err[req_id]
-            del self._req_buf[req_id]
-            del self._req_numlines[req_id]
+            self._req_failed.pop(req_id, None)
+            self._req_err.pop(req_id, None)
+            self._req_buf.pop(req_id, None)
+            self._req_numlines.pop(req_id, None)
+            self._req_event.pop(req_id, None)
+
+    def _wait_for_request(self, req_id: str, req_cmd: str,
+                          timeout: float = None) -> None:
+        if not self._req_event[req_id].wait(timeout=timeout):
+            self._cleanup_request_data(req_id)
+            raise TimeoutError(
+                "Request: %s timed out after %s seconds" % (
+                    req_cmd.strip(), timeout))
 
     def _setup_request_data(self, req_id: str) -> None:
         with self._req_lock:
@@ -2840,7 +2864,7 @@ class LookupConn(FeedConn):
             search_field, search_term, fr.blob_to_str(filt_type),
             fr.blob_to_str(filt_val), req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_symbols(req_id)
         if data.dtype == object:
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[0]))
@@ -2887,7 +2911,7 @@ class LookupConn(FeedConn):
         self._setup_request_data(req_id)
         req_cmd = "SBS,%d,%s\r\n" % (sic, req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_symbols_with_sect(req_id)
         if data.dtype == object:
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[0]))
@@ -2910,7 +2934,7 @@ class LookupConn(FeedConn):
         self._setup_request_data(req_id)
         req_cmd = "SBN,%d,%s\r\n" % (naic, req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_symbols_with_sect(req_id)
         if data.dtype == object:
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[0]))
@@ -2968,7 +2992,7 @@ class LookupConn(FeedConn):
             symbol, fr.blob_to_str(month_codes), fr.blob_to_str(years),
             fr.blob_to_str(near_months), req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_futures_chain(req_id)
         if (len(data) == 2) and (data[0] == "!ERROR!"):
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
@@ -3014,7 +3038,7 @@ class LookupConn(FeedConn):
             symbol, fr.blob_to_str(month_codes), fr.blob_to_str(years),
             fr.blob_to_str(near_months), req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_futures_chain(req_id)
         if (len(data) == 2) and (data[0] == "!ERROR!"):
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
@@ -3101,7 +3125,7 @@ class LookupConn(FeedConn):
             req_id)
 
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_option_chain(req_id)
         if (type(data) == list) and (data[0] == "!ERROR!"):
             iqfeed_err = str(data[1])
@@ -3185,7 +3209,7 @@ class LookupConn(FeedConn):
                 fr.blob_to_str(near_months), include_binary, filt_type,
                 fr.blob_to_str(filt_val_1), fr.blob_to_str(filt_val_2), req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_option_chain(req_id)
         if (type(data) == list) and (data[0] == "!ERROR!"):
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
@@ -3215,7 +3239,7 @@ class LookupConn(FeedConn):
             req_id,
         )
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_mkt_summary(req_id)
         if (type(data) == list) and (len(data) > 0) and (data[0] == "!ERROR!"):
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
@@ -3249,7 +3273,7 @@ class LookupConn(FeedConn):
             req_id,
         )
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_mkt_summary(req_id)
         if (type(data) == list) and (len(data) > 0) and (data[0] == "!ERROR!"):
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
@@ -3283,7 +3307,7 @@ class LookupConn(FeedConn):
             req_id,
         )
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         data = self._read_mkt_summary(req_id)
         if (type(data) == list) and (len(data) > 0) and (data[0] == "!ERROR!"):
             err_msg = "Request: %s, Error: %s" % (req_cmd, str(data[1]))
@@ -3545,19 +3569,22 @@ class NewsConn(FeedConn):
 
     def _process_news_datum(self, fields: Sequence[str]) -> None:
         req_id = fields[0]
-        if 'E' == fields[1] and (len(fields) <= 2 or fields[2].startswith('!') or 'Unauthorized' in fields[2] or 'Error' in fields[2]):
-            # Error
-            self._req_failed[req_id] = True
-            err_msg = "Unknown Error"
-            if len(fields) > 2:
-                if fields[2] != "":
-                    err_msg = fields[2]
-            self._req_err[req_id] = err_msg
-        elif '!ENDMSG!' == fields[1]:
-            self._req_event[req_id].set()
-        else:
-            self._req_buf[req_id].append(fields)
-            self._req_numlines[req_id] += 1
+        with self._req_lock:
+            if req_id not in self._req_buf:
+                return
+            if 'E' == fields[1] and (len(fields) <= 2 or fields[2].startswith('!') or 'Unauthorized' in fields[2] or 'Error' in fields[2]):
+                # Error
+                self._req_failed[req_id] = True
+                err_msg = "Unknown Error"
+                if len(fields) > 2:
+                    if fields[2] != "":
+                        err_msg = fields[2]
+                self._req_err[req_id] = err_msg
+            elif '!ENDMSG!' == fields[1]:
+                self._req_event[req_id].set()
+            else:
+                self._req_buf[req_id].append(fields)
+                self._req_numlines[req_id] += 1
 
     def _get_next_req_id(self) -> str:
         with self._req_lock:
@@ -3567,10 +3594,19 @@ class NewsConn(FeedConn):
 
     def _cleanup_request_data(self, req_id: str) -> None:
         with self._req_lock:
-            del self._req_failed[req_id]
-            del self._req_err[req_id]
-            del self._req_buf[req_id]
-            del self._req_numlines[req_id]
+            self._req_failed.pop(req_id, None)
+            self._req_err.pop(req_id, None)
+            self._req_buf.pop(req_id, None)
+            self._req_numlines.pop(req_id, None)
+            self._req_event.pop(req_id, None)
+
+    def _wait_for_request(self, req_id: str, req_cmd: str,
+                          timeout: int = None) -> None:
+        if not self._req_event[req_id].wait(timeout=timeout):
+            self._cleanup_request_data(req_id)
+            raise TimeoutError(
+                "Request: %s timed out after %s seconds" % (
+                    req_cmd.strip(), timeout))
 
     def _setup_request_data(self, req_id: str) -> None:
         with self._req_lock:
@@ -3636,7 +3672,7 @@ class NewsConn(FeedConn):
 
         req_cmd = "NCG,x,%s\r\n" % req_id
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         xml_data = self._get_xml_message(req_id)
         if hasattr(xml_data, 'dtype'):
             if xml_data.dtype == object:
@@ -3735,7 +3771,7 @@ class NewsConn(FeedConn):
         req_cmd = "NHL,%s,%s,%s,%d,%s,%s\r\n" % (
             sources_str, symbols_str, 'x', limit, date_str, req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         xml_data = self._get_xml_message(req_id)
         if hasattr(xml_data, 'dtype'):
             if xml_data.dtype == object:
@@ -3778,7 +3814,7 @@ class NewsConn(FeedConn):
 
         req_cmd = "NSY,%s,x,,%s\r\n" % (story_id, req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         xml_data = self._get_xml_message(req_id)
         if hasattr(xml_data, 'dtype'):
             if xml_data.dtype == object:
@@ -3851,7 +3887,7 @@ class NewsConn(FeedConn):
         req_cmd = "NSC,%s,x,%s,%s,%s\r\n" % (
             symbols_str, sources_str, date_range_str, req_id)
         self._send_cmd(req_cmd)
-        self._req_event[req_id].wait(timeout=timeout)
+        self._wait_for_request(req_id, req_cmd, timeout)
         xml_data = self._get_xml_message(req_id)
         if hasattr(xml_data, 'dtype'):
             if xml_data.dtype == object:
